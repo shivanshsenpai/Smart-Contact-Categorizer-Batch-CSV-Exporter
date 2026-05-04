@@ -1,0 +1,406 @@
+/**
+ * ==========================================
+ * CONFIGURATION SETTINGS (EDIT THESE)
+ * ==========================================
+ */
+const CONFIG = {
+  SOURCE_SHEET_NAME: "RawData",        // Name of your main data sheet
+  DATA_START_ROW: 2,                   // Row where your data begins (after headers)
+  
+  // 0-indexed column mappings (e.g., Column A = 0, Column D = 3)
+  COL_NAME: 0,                         
+  COL_CATEGORY: 3,                     
+  COL_PHONE: 4,                        
+
+  // Aggregation Settings
+  MIN_COUNT_THRESHOLD: 20,             // Minimum items needed for a dedicated sheet
+  AGGREGATE_KEYWORD: "keyword",        // A broad word to group specific low-count items (e.g., "accessories")
+  AGGREGATE_SHEET_NAME: "Grouped Items", 
+  LOW_COUNT_SHEET_NAME: "Low Volume Items",
+
+  // System Settings
+  LOG_SHEET_NAME: "System Log",
+  EXPORT_LOG_SHEET_NAME: "Export History",
+  DEFAULT_BATCH_SIZE: 200,             // Default contacts per group
+  COUNTRY_CODE: "1"                    // Your default country code (e.g., "1" for US, "44" for UK, "91" for India)
+};
+
+// Define your categories and the keywords used to find them
+const CATEGORY_RULES = [
+  { name: "Category One", regex: /\b(item1|item2|item3)\b/ },
+  { name: "Category Two", regex: /\b(item4|item5)\b/ }
+  // Add as many rules as needed...
+];
+
+// Map your final sheet names to the initials/prefixes you want in the CSV exports
+const CATEGORY_PREFIXES = {
+  "Category One": "C1",
+  "Category Two": "C2",
+  "Grouped Items": "GRP",
+  "Low Volume Items": "LOW"
+  // Add mappings for all possible resulting sheet names...
+};
+
+
+/**
+ * ==========================================
+ * SHEET GENERATION & CATEGORIZATION
+ * ==========================================
+ */
+function generateCategorySheets() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const dataSheet = ss.getSheetByName(CONFIG.SOURCE_SHEET_NAME) || ss.getActiveSheet();
+  
+  const lastRow = dataSheet.getLastRow();
+  if (lastRow < CONFIG.DATA_START_ROW) return; 
+  
+  // Fetch relevant columns
+  const maxCol = Math.max(CONFIG.COL_NAME, CONFIG.COL_CATEGORY, CONFIG.COL_PHONE) + 1;
+  const data = dataSheet.getRange(CONFIG.DATA_START_ROW, 1, lastRow - 1, maxCol).getValues();
+
+  let categoryMap = {};
+
+  // STEP 1: Process and count all categories
+  data.forEach(row => {
+    let rawItem = row[CONFIG.COL_CATEGORY]; 
+    if (!rawItem || rawItem === "-") return;
+    
+    let category = smartNormalize(rawItem);
+    if (!category) return;
+    
+    categoryMap[category] = (categoryMap[category] || 0) + 1;
+  });
+
+  // STEP 2: Apply threshold and aggregation logic
+  let finalCategoryMap = {};
+  Object.entries(categoryMap).forEach(([cat, count]) => {
+    if (count >= CONFIG.MIN_COUNT_THRESHOLD) {
+      finalCategoryMap[cat] = cat;
+    } else {
+      let isAggregatedGroup = cat.toLowerCase().includes(CONFIG.AGGREGATE_KEYWORD);
+      if (isAggregatedGroup) {
+        finalCategoryMap[cat] = CONFIG.AGGREGATE_SHEET_NAME;
+      } else {
+        finalCategoryMap[cat] = CONFIG.LOW_COUNT_SHEET_NAME; 
+      }
+    }
+  });
+
+  // STEP 3: Route rows to final buckets
+  let sheetsData = {};
+  data.forEach(row => {
+    let customerName = row[CONFIG.COL_NAME]; 
+    let itemName = row[CONFIG.COL_CATEGORY];  
+    let phoneNumber = row[CONFIG.COL_PHONE];  
+
+    if (!itemName || itemName === "-") return;
+    let rawCategory = smartNormalize(itemName);
+    if (!rawCategory) return;
+
+    let finalCategory = finalCategoryMap[rawCategory];
+    
+    // Clean sheet name for Google Sheets safety
+    let safeSheetName = finalCategory.replace(/[\/\?\*\[\]\:\\]/g, "-").substring(0, 31).trim();
+
+    if (!sheetsData[safeSheetName]) sheetsData[safeSheetName] = [];
+    sheetsData[safeSheetName].push([customerName, itemName, phoneNumber]);
+  });
+
+  // STEP 4: Build Sheets and write data
+  Object.keys(sheetsData).forEach(sheetName => {
+    let targetSheet = ss.getSheetByName(sheetName);
+    
+    if (!targetSheet) {
+      targetSheet = ss.insertSheet(sheetName);
+    } else {
+      targetSheet.clear();
+    }
+
+    let headers = [["Name", "Item", "Phone"]];
+    targetSheet.getRange(1, 1, 1, 3).setValues(headers).setFontWeight("bold");
+
+    let rows = sheetsData[sheetName];
+    targetSheet.getRange(2, 1, rows.length, 3).setValues(rows);
+    targetSheet.autoResizeColumns(1, 3);
+  });
+}
+
+function smartNormalize(text) {
+  if (!text) return "";
+  let t = String(text).toLowerCase();
+
+  // Pre-processing cleanup
+  t = t.replace(/\n/g, " ");
+  t = t.replace(/\b\d+(\.\d+)?\b/g, ""); // remove numbers
+  t = t.replace(/[^a-z\s]/g, " "); // remove special characters
+  t = t.replace(/\s+/g, " ").trim();
+  if (!t) return "";
+
+  // Check against config rules
+  for (let i = 0; i < CATEGORY_RULES.length; i++) {
+    if (CATEGORY_RULES[i].regex.test(t)) {
+      return CATEGORY_RULES[i].name;
+    }
+  }
+
+  // Fallback if no match
+  return "Uncategorized: " + t.replace(/\b\w/g, l => l.toUpperCase()); 
+} 
+
+function listAllSheetNames() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheets = ss.getSheets();
+  const sheetNames = sheets.map(sheet => [sheet.getName()]);
+  
+  let logSheet = ss.getSheetByName(CONFIG.LOG_SHEET_NAME) || ss.insertSheet(CONFIG.LOG_SHEET_NAME);
+  
+  logSheet.getRange(1, 4).setValue("Directory of All Sheets").setFontWeight("bold");
+  const maxRows = logSheet.getMaxRows();
+  if (maxRows > 1) {
+    logSheet.getRange(2, 4, maxRows - 1, 1).clearContent();
+  }
+  
+  logSheet.getRange(2, 4, sheetNames.length, 1).setValues(sheetNames);
+  logSheet.autoResizeColumn(4);
+}
+
+/**
+ * ==========================================
+ * USER INTERFACE & MENUS
+ * ==========================================
+ */
+function onOpen() {
+  const ui = SpreadsheetApp.getUi();
+  ui.createMenu('🟢 CRM Exporter')
+    .addItem(`1. Format All Data (Default ${CONFIG.DEFAULT_BATCH_SIZE}/Group)`, 'menuPrepareAll')
+    .addItem('2. Export ALL to CSVs', 'menuExportAll')
+    .addSeparator()
+    .addItem('3. ⚙️ Advanced Export Options', 'showOptionsPopup')
+    .addToUi();
+}
+
+function showOptionsPopup() {
+  const sheetKeys = Object.keys(CATEGORY_PREFIXES);
+  let dropdownOptions = `<option value="ALL">🌟 ALL Categories</option>`;
+  sheetKeys.forEach(sheet => {
+      dropdownOptions += `<option value="${sheet}">${sheet}</option>`;
+  });
+
+  const htmlString = `
+  <!DOCTYPE html>
+  <html>
+    <head>
+      <style>
+        body { font-family: 'Segoe UI', sans-serif; padding: 15px; color: #333; }
+        h2 { margin-top: 0; color: #1a73e8; }
+        label { font-weight: bold; display: block; margin-top: 15px; margin-bottom: 5px; }
+        select, input { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+        button { margin-top: 25px; width: 100%; padding: 12px; background-color: #1a73e8; color: white; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; }
+        button:hover { background-color: #1557b0; }
+        .note { font-size: 12px; color: #666; margin-top: 5px; font-style: italic; }
+      </style>
+    </head>
+    <body>
+      <h2>⚙️ Batch Exporter</h2>
+      <label for="category">Select Category:</label>
+      <select id="category">${dropdownOptions}</select>
+      
+      <label for="batchSize">Contacts per Group:</label>
+      <input type="number" id="batchSize" value="${CONFIG.DEFAULT_BATCH_SIZE}" min="10" max="1000">
+      <div class="note">Generates standard and Google Contacts formatted CSVs.</div>
+
+      <button id="runBtn" onclick="runExport()">🚀 Format & Export Now</button>
+
+      <script>
+        function runExport() {
+          const btn = document.getElementById('runBtn');
+          btn.innerText = "⏳ Processing...";
+          btn.disabled = true;
+          btn.style.backgroundColor = "#999";
+          const category = document.getElementById('category').value;
+          const batchSize = parseInt(document.getElementById('batchSize').value) || ${CONFIG.DEFAULT_BATCH_SIZE};
+
+          google.script.run
+            .withSuccessHandler(() => google.script.host.close())
+            .withFailureHandler((err) => { alert("Error: " + err.message); google.script.host.close(); })
+            .executeCustomExport(category, batchSize);
+        }
+      </script>
+    </body>
+  </html>
+  `;
+  
+  const htmlOutput = HtmlService.createHtmlOutput(htmlString).setWidth(400).setHeight(400);
+  SpreadsheetApp.getUi().showModalDialog(htmlOutput, 'Advanced Export Options');
+}
+
+function executeCustomExport(targetCategory, batchSize) {
+  prepareBroadcastData(batchSize, targetCategory);
+  exportContactsCSVs(targetCategory);
+}
+
+function menuPrepareAll() {
+  prepareBroadcastData(CONFIG.DEFAULT_BATCH_SIZE, "ALL");
+  SpreadsheetApp.getUi().toast("Data formatted and grouped successfully!", "Step 1 Complete", 5);
+}
+
+function menuExportAll() {
+  exportContactsCSVs("ALL");
+}
+
+/**
+ * ==========================================
+ * CORE EXPORT ENGINE
+ * ==========================================
+ */
+function prepareBroadcastData(batchSize = CONFIG.DEFAULT_BATCH_SIZE, targetCategory = "ALL") {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheetsToProcess = targetCategory === "ALL" ? Object.keys(CATEGORY_PREFIXES) : [targetCategory];
+
+  sheetsToProcess.forEach(sheetName => {
+    const sheet = ss.getSheetByName(sheetName);
+    if (!sheet) return;
+
+    const lastRow = sheet.getLastRow();
+    sheet.getRange(1, 4, 1, 3).setValues([["Group Name", "Formatted Number", "Status"]]).setFontWeight("bold");
+    if (lastRow < 2) return;
+
+    const data = sheet.getRange(2, 1, lastRow - 1, 6).getValues();
+    const prefix = CATEGORY_PREFIXES[sheetName] || "GEN";
+
+    const updatedData = data.map((row, index) => {
+      let custName = row[0] ? String(row[0]).trim() : "Customer";
+      let rawPhone = row[2];
+      let currentStatus = row[5] || ""; 
+
+      let groupNum = Math.floor(index / batchSize) + 1;
+      let broadcastName = `${prefix} G${groupNum} ${custName}`;
+      let formattedPhone = cleanPhoneNumber(rawPhone);
+
+      return [broadcastName, formattedPhone, currentStatus];
+    });
+
+    sheet.getRange(2, 4, updatedData.length, 3).setValues(updatedData);
+    sheet.autoResizeColumns(4, 3);
+  });
+}
+
+function exportContactsCSVs(targetCategory = "ALL") {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  
+  let csvStandard = {}; 
+  let csvGoogleContacts = {}; 
+  let sheetsToUpdate = []; 
+  let exportStats = {}; 
+
+  let sheetsToProcess = targetCategory === "ALL" ? Object.keys(CATEGORY_PREFIXES) : [targetCategory];
+
+  sheetsToProcess.forEach(sheetName => {
+    const sheet = ss.getSheetByName(sheetName);
+    if (!sheet) return;
+
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) return;
+
+    const dataRange = sheet.getRange(2, 4, lastRow - 1, 3);
+    const data = dataRange.getValues();
+    
+    let hasUpdates = false;
+    let sheetExportCount = 0; 
+
+    data.forEach((row, index) => {
+      let broadcastName = row[0];
+      let phoneNum = String(row[1]);
+      let status = row[2];
+
+      if (broadcastName && phoneNum && status !== "Exported") {
+        let filePrefix = broadcastName.split(" ").slice(0, 2).join("_"); 
+
+        if (!csvStandard[filePrefix]) {
+          csvStandard[filePrefix] = ["Name,Phone"];
+          csvGoogleContacts[filePrefix] = ["Name,Phone 1 - Value"]; 
+        }
+
+        // Standard CSV Format
+        csvStandard[filePrefix].push(`"${broadcastName}","${phoneNum}"`);
+
+        // Google Contacts CSV Format (+ Country Code)
+        let gcPhone = phoneNum.startsWith("+") ? phoneNum : "+" + phoneNum;
+        csvGoogleContacts[filePrefix].push(`"${broadcastName}","${gcPhone}"`);
+        
+        data[index][2] = "Exported";
+        hasUpdates = true;
+        sheetExportCount++;
+      }
+    });
+
+    if (hasUpdates) {
+      sheetsToUpdate.push({ range: dataRange, values: data });
+      exportStats[sheetName] = sheetExportCount; 
+    }
+  });
+
+  let filesCreated = 0;
+  Object.keys(csvStandard).forEach(fileName => {
+    let csvStringStd = csvStandard[fileName].join("\n");
+    DriveApp.createFile(`STD_${fileName}_Contacts.csv`, csvStringStd, MimeType.CSV);
+    
+    let csvStringGC = csvGoogleContacts[fileName].join("\n");
+    DriveApp.createFile(`GC_${fileName}_Contacts.csv`, csvStringGC, MimeType.CSV);
+    
+    filesCreated += 2; 
+  });
+
+  sheetsToUpdate.forEach(update => update.range.setValues(update.values));
+
+  // Handle Logging
+  let totalExported = 0;
+  let logRows = [];
+  let timestamp = new Date(); 
+  
+  Object.keys(exportStats).forEach(sheetName => {
+    let count = exportStats[sheetName];
+    totalExported += count;
+    let formattedTime = Utilities.formatDate(timestamp, ss.getSpreadsheetTimeZone(), "dd/MM/yyyy HH:mm:ss");
+    logRows.push([formattedTime, sheetName, count]);
+  });
+
+  if (logRows.length > 0) {
+    let logSheet = ss.getSheetByName(CONFIG.EXPORT_LOG_SHEET_NAME) || ss.insertSheet(CONFIG.EXPORT_LOG_SHEET_NAME, 0);
+    if (logSheet.getLastRow() === 0) {
+      logSheet.appendRow(["Date & Time", "Category", "Export Count"]);
+      logSheet.getRange("A1:C1").setFontWeight("bold").setBackground("#f3f3f3");
+    }
+    logSheet.getRange(logSheet.getLastRow() + 1, 1, logRows.length, 3).setValues(logRows);
+    logSheet.autoResizeColumns(1, 3);
+  }
+
+  const ui = SpreadsheetApp.getUi();
+  if (filesCreated > 0) {
+    ui.alert(`✅ Success! Created ${filesCreated} files total.\n\nTotal Contacts Exported: ${totalExported}\n\nCheck Google Drive for the CSV files.`);
+  } else {
+    ui.alert(`ℹ️ No new contacts to export for the selected category. Everyone is already marked as 'Exported'.`);
+  }
+}
+
+/**
+ * HELPER: Cleans phone numbers
+ */
+function cleanPhoneNumber(rawPhone) {
+  if (!rawPhone) return "";
+  let digits = String(rawPhone).replace(/\D/g, "");
+  
+  // Cut down platform-masked numbers (e.g., e-commerce virtual numbers)
+  if (digits.length > 12) digits = digits.substring(0, 10);
+  
+  let cc = CONFIG.COUNTRY_CODE;
+  let len = digits.length;
+  let baseLength = 10; // Standard base phone number length without country code
+
+  // Formatting logic to ensure the country code is prefixed properly
+  if (len === baseLength) return cc + digits; 
+  if (len === baseLength + 1 && digits.startsWith("0")) return cc + digits.substring(1); 
+  if (digits.startsWith(cc)) return digits; 
+  
+  return digits; 
+}
